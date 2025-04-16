@@ -1,7 +1,8 @@
 base_model_prompt = {
     "instructions": (
-        'Here is a question and some relevant contexts(separated by “\\n\\n”). Please provide an answer to the question based on the given infomations.\n'
-        'If the question is not answerable based on the given infomations, please answer "this question cannot be answered".'
+        'You are given a question and a set of contexts which may or may not be relevant to the question. '
+        'If the contexts contain information relevant to the question, answer based strictly on the contexts. '
+        'If the contexts do not contain relevant information, use your own knowledge to answer the question.\n'
     ),
     "input": (
         'Contexts: {contexts}\n\n'
@@ -12,10 +13,10 @@ base_model_prompt = {
 
 evaluator_prompt = {
     "instructions": (
-        'Here is a question, a set of golden answers (separated by “/”), and an AI-generated answer. ' 
+        'Here is a question, a set of golden answers, and an AI-generated answer. ' 
         'Your task is to determine whether the AI-generated answer contains any hallucinations relative to the question and the golden answers. '
         'Apply the following criteria:\n'
-        '1. Language Fluency: If the AI-generated answer is not fluent (e.g., contains garbled text or excessive code), judge it as hallucinated;\n'
+        '1. Language Fluency: If the AI-generated answer is not fluent, judge it as hallucinated;\n'
         '2. Relevance: If the answer does not directly address the question, judge it as hallucinated;\n'
         '3. Consistency: If the answer includes information that contradicts any of the golden answers, judge it as hallucinated;\n'
         '4. Semantic Alignment: If the overall meaning of the answer aligns with the golden answers, it should be considered as not hallucinated.;\n'

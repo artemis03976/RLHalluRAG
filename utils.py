@@ -17,6 +17,10 @@ def set_seeds(args):
     torch.backends.cudnn.benchmark = True
 
 
+def clean_text(output):
+    return output.split("</think>", 1)[-1].lstrip()
+
+
 def extract_judgement(output):
     pattern = re.compile(r"\b(Yes|No)\b")
     res = pattern.findall(output)

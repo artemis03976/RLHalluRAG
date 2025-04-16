@@ -8,10 +8,12 @@ import json
 
 
 client = OpenAI(
-    api_key = "sk-fd3wC6DBhwl3UAAf1519B466536d4386A80a6aFcBb4e4932",
-    base_url="https://chat.zju.edu.cn/api/ai/v1"
+    # api_key = "sk-fd3wC6DBhwl3UAAf1519B466536d4386A80a6aFcBb4e4932",
+    # base_url="https://chat.zju.edu.cn/api/ai/v1",
+    # volca
+    api_key = "6bbc4112-8880-41f3-95bd-e19822d45191", 
+    base_url="https://ark.cn-beijing.volces.com/api/v3",
 )
-
 
 
 class HalluEvaluator(nn.Module):
@@ -21,8 +23,6 @@ class HalluEvaluator(nn.Module):
         temperature,
         max_tokens,
         top_p,
-        frequency_penalty,
-        presence_penalty
     ) -> None:
         super().__init__()
 
@@ -30,8 +30,6 @@ class HalluEvaluator(nn.Module):
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.top_p = top_p
-        self.frequency_penalty = frequency_penalty
-        self.presence_penalty = presence_penalty
 
     @lru_cache(maxsize=10000)
     def call_api(self, prompt):
@@ -45,8 +43,6 @@ class HalluEvaluator(nn.Module):
                     temperature=0.0,
                     max_tokens=32,
                     top_p=self.top_p,
-                    frequency_penalty=self.frequency_penalty,
-                    presence_penalty=self.presence_penalty,
                     stop=["\n"]
                 )
                 output = response.choices[0].message.content.strip()
@@ -70,17 +66,12 @@ class HalluEvaluator(nn.Module):
             )}
         ]
 
-    def forward(self, questions, golden_answers, generated_answers):
-        judgements = []
+    def forward(self, question, golden_answer, generated_answer):
+        # generate the prompt input
+        prompt = self.build_evaluator_prompt(question, golden_answer, generated_answer)
+        # get the output from evaluator model
+        output = self.call_api(json.dumps(prompt))
+        # extract the judgement from the output
+        judgement = extract_judgement(output)
 
-        # loop over the training examples
-        for i in range(len(questions)):
-            # generate the prompt input
-            prompt = self.build_evaluator_prompt(questions[i], golden_answers[i], generated_answers[i])
-            # get the output from evaluator model
-            output = self.call_api(json.dumps(prompt))
-            # extract the judgement from the output
-            judgement = extract_judgement(output)
-            judgements.append(judgement)
-
-        return judgements
+        return judgement

@@ -1,14 +1,15 @@
 import argparse
 import os
 import torch
+from torch.nn.utils import clip_grad_norm_
 import json
 from utils import set_seeds, get_logger
 from model import HalluRLRAG
 from data import get_dataloader
-import sys
+from tqdm import tqdm
 
 
-def train(args, model, train_dataloader, logger):
+def train_reinforce(args, model, train_dataloader, logger):
     optimizer = torch.optim.Adam([p for p in model.retriver.parameters() if p.requires_grad], lr=args.lr)
 
     total_reward_history = []
@@ -18,18 +19,15 @@ def train(args, model, train_dataloader, logger):
         logger.info("=========================================")
         logger.info(f"==== Epoch: {epoch} / {args.epochs} ====")
 
-        train_reward = 0
+        train_reward = 0.0
         train_loss = 0.0
 
-        # We can simply set the batch_size to len(train_data) in few-shot setting.
-        for batch in train_dataloader:
-            questions, answers, contexts = batch
-
-            reward, loss = model(questions, answers, contexts)
-            sys.exit()
-
+        for batch in tqdm(train_dataloader):
+            reward, loss = model(batch)
+    
             optimizer.zero_grad()
             loss.backward()
+            clip_grad_norm_(model.retriver.linear.parameters(), max_norm=1.0)
             optimizer.step()
 
             train_reward += reward
@@ -40,8 +38,8 @@ def train(args, model, train_dataloader, logger):
 
         best_reward = max(total_reward_history)
         best_loss = min(total_loss_history)
-        best_reward_epoch = total_reward_history.index(best_reward)
-        best_loss_epoch = total_loss_history.index(best_loss)
+        best_reward_epoch = total_reward_history.index(best_reward) + 1
+        best_loss_epoch = total_loss_history.index(best_loss) + 1
 
         logger.info(f"==== Total Reward for Epoch {epoch}: {train_reward} ====")
         logger.info(f"==== Total Loss for Epoch {epoch}: {train_loss} ====")
@@ -79,6 +77,91 @@ def train(args, model, train_dataloader, logger):
     logger.info(f"==== Save final ckpt to {ckpt} ====")
 
 
+def train_grpo(args, model, train_dataloader, logger):
+    optimizer = torch.optim.Adam([p for p in model.retriver.parameters() if p.requires_grad], lr=args.lr)
+
+    total_reward_history = []
+    total_loss_history = []
+
+    for epoch in range(1, args.epochs + 1):
+        logger.info("=========================================")
+        logger.info(f"==== Epoch: {epoch} / {args.epochs} ====")
+
+        train_reward = 0.0
+        train_loss = 0.0
+
+        for batch in tqdm(train_dataloader):
+            optimizer.zero_grad()
+
+            # split batch by group size
+            groups = [batch[i: i + args.group_size] for i in range(0, len(batch), args.group_size)]
+            group_loss = 0.0
+            group_reward = 0.0
+
+            for group in groups:
+                reward, loss = model(group)
+
+                loss.backward()
+                group_loss += loss.item()
+                group_reward += reward.item()
+
+            clip_grad_norm_(model.retriver.linear.parameters(), max_norm=1.0)
+            optimizer.step()
+
+            train_reward += group_reward / len(groups)
+            train_loss += group_loss / len(groups)
+        
+        total_reward_history.append(train_reward)
+        total_loss_history.append(train_loss)
+
+        best_reward = max(total_reward_history)
+        best_loss = min(total_loss_history)
+        best_reward_epoch = total_reward_history.index(best_reward) + 1
+        best_loss_epoch = total_loss_history.index(best_loss) + 1
+
+        logger.info(f"==== Total Reward for Epoch {epoch}: {train_reward} ====")
+        logger.info(f"==== Total Loss for Epoch {epoch}: {train_loss} ====")
+        logger.info(f"==== Best Reward: {best_reward} at Epoch {best_reward_epoch} ====")
+        logger.info(f"==== Best Loss: {best_loss} at Epoch {best_loss_epoch} ====")
+
+        # save every epoch
+        ckpt = os.path.join(args.output_path, f"ckpt_{epoch}.pt")
+        torch.save(model.retriver.linear.state_dict(), ckpt)
+        logger.info(f"==== Save ckpt to {ckpt} ====")
+
+        # save best epoch
+        if epoch == best_reward_epoch:
+            ckpt = os.path.join(args.output_path, "ckpt_best_reward.pt")
+            torch.save(model.retriver.linear.state_dict(), ckpt)
+            logger.info(f"==== Save best reward ckpt to {ckpt} ====")
+
+        if epoch == best_loss_epoch:
+            ckpt = os.path.join(args.output_path, "ckpt_best_loss.pt")
+            torch.save(model.retriver.linear.state_dict(), ckpt)
+            logger.info(f"==== Save best loss ckpt to {ckpt} ====")
+
+        # save reward and loss history
+        history = {
+            "total_reward_history": total_reward_history,
+            "total_loss_history": total_loss_history,
+        }
+        history_file = os.path.join(args.log_path, "history.json")
+        with open(history_file, 'w') as f:
+            json.dump(history, f, indent=4, separators=(',', ': '))
+
+    # save in the end
+    ckpt = os.path.join(args.output_path, "ckpt_final.pt")
+    torch.save(model.retriver.linear.state_dict(), ckpt)
+    logger.info(f"==== Save final ckpt to {ckpt} ====")
+
+
+def train(args, model, train_dataloader, logger):
+    if args.method == 'reinforce':
+        train_reinforce(args, model, train_dataloader, logger)
+    elif args.method == 'grpo':
+        train_grpo(args, model, train_dataloader, logger)
+
+
 def get_args():
     parser = argparse.ArgumentParser()
 
@@ -89,20 +172,22 @@ def get_args():
         help='base model for retriver'
     )
     parser.add_argument(
-        '--embedding_size', type=int, default=128, 
+        '--n_preselect', type=int, default=20, 
+        help='Number of preselected contexts.'
+    )
+    parser.add_argument(
+        '--embedding_size', type=int, default=256, 
         help='Hidden state size of final layer in retriver'
     )
 
     # base model settings
     parser.add_argument(
-        '--base_model_name', type=str, default='deepseek-v3-671b', 
+        '--base_model_name', type=str, default='Qwen/Qwen2.5-7B-Instruct', 
         help='base model for generating answers'
     )
-
-    # evaluator settings
     parser.add_argument(
-        '--evaluator_name', type=str, default='deepseek-v3-671b', 
-        help='base model for evaluator'
+        '--use_hf_model', action='store_true', default=False, 
+        help='use huggingface models'
     )
     parser.add_argument(
         '--temperature', type=float, default=0.0,
@@ -116,18 +201,16 @@ def get_args():
         '--top_p', type=float, default=1.0,
         help='The cumulative probability threshold for nucleus sampling.'
     )
+
+    # evaluator settings
     parser.add_argument(
-        '--frequency_penalty', type=float, default=0.0,
-        help='The penalty for repeating tokens.'
-    )
-    parser.add_argument(
-        '--presence_penalty', type=float, default=0.0,
-        help='The penalty for not repeating tokens.'
+        '--evaluator_name', type=str, default='deepseek-v3-671b', 
+        help='base model for evaluator'
     )
 
     # training settings
     parser.add_argument(
-        '--seed', type=int, default=1, 
+        '--seed', type=int, default=42, 
         help='random seed'
     )
     parser.add_argument(
@@ -135,28 +218,33 @@ def get_args():
         help='training device'
     )
     parser.add_argument(
-        '--n_shot', type=int, default=2, 
+        '--method', type=str, default='reinforce',
+        choices=['reinforce', 'grpo'],
+        help='training method'
+    )
+    parser.add_argument(
+        '--n_shot', type=int, default=5, 
         help='Number of n-shot training examples.'
     )
     parser.add_argument(
-        '--n_samples', type=int, default=20,
+        '--n_samples', type=int, default=1000,
         help='Number of training samples.'
     )
     parser.add_argument(
-        '--n_candidates', type=int, default=10, 
-        help='Number of candidate prompts.'
-    )
-    parser.add_argument(
-        '--lr', type=float, default=0.001,
+        '--lr', type=float, default=0.0001,
         help='Learning rate of policy network.'
     )
     parser.add_argument(
-        '--epochs', type=int, default=20, 
+        '--epochs', type=int, default=5, 
         help='Number of training epochs.'
     )
     parser.add_argument(
-        '--batch_size', type=int, default=2,
-        help='Training batch size. Set to n_samples by default.'
+        '--batch_size', type=int, default=1,
+        help='Training batch size.'
+    )
+    parser.add_argument(
+        '--group_size', type=int, default=2,
+        help='Number of training samples.'
     )
 
     # save settings
@@ -192,12 +280,13 @@ def main():
         args.temperature,
         args.max_tokens,
         args.top_p,
-        args.frequency_penalty,
-        args.presence_penalty,
-        args.n_shot
+        args.method,
+        args.use_hf_model,
+        args.n_shot,
+        args.n_preselect,
     ).to(args.device)
 
-    train_dataloader = get_dataloader(args, split='train')
+    train_dataloader = get_dataloader(args, name='NQ', split='train')
 
     logger = get_logger(args)
 
