@@ -43,10 +43,14 @@ class BaseModel(nn.Module):
                 self.base_model_name,
                 torch_dtype=torch.bfloat16,
                 attn_implementation="flash_attention_2",
-                # device_map="auto",
+                device_map=None,
                 quantization_config=quantization_config
             )
+            self.model.eval()
             self.tokenizer = AutoTokenizer.from_pretrained(self.base_model_name)
+
+            for param in self.model.parameters():
+                param.requires_grad = False
 
     @lru_cache(maxsize=10000)
     def call_api(self, prompt):
@@ -75,6 +79,7 @@ class BaseModel(nn.Module):
 
         return output
     
+    @torch.inference_mode()
     def call_hf_model(self, prompt):
         text = self.tokenizer.apply_chat_template(
             prompt,

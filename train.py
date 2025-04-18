@@ -2,22 +2,27 @@ import argparse
 import os
 import torch
 from torch.nn.utils import clip_grad_norm_
+from torch.nn.parallel import DistributedDataParallel
 import json
 from utils import set_seeds, get_logger
 from model import HalluRLRAG
 from data import get_dataloader
 from tqdm import tqdm
+from accelerate import Accelerator
 
 
-def train_reinforce(args, model, train_dataloader, logger):
+def train_reinforce(args, model, train_dataloader, logger, accelerator):
     optimizer = torch.optim.Adam([p for p in model.retriver.parameters() if p.requires_grad], lr=args.lr)
 
     total_reward_history = []
     total_loss_history = []
 
+    model, train_dataloader, optimizer = accelerator.prepare(model, train_dataloader, optimizer)
+
     for epoch in range(1, args.epochs + 1):
-        logger.info("=========================================")
-        logger.info(f"==== Epoch: {epoch} / {args.epochs} ====")
+        if accelerator.is_main_process:
+            logger.info("=========================================")
+            logger.info(f"==== Epoch: {epoch} / {args.epochs} ====")
 
         train_reward = 0.0
         train_loss = 0.0
@@ -26,8 +31,11 @@ def train_reinforce(args, model, train_dataloader, logger):
             reward, loss = model(batch)
     
             optimizer.zero_grad()
-            loss.backward()
-            clip_grad_norm_(model.retriver.linear.parameters(), max_norm=1.0)
+            accelerator.backward(loss)
+            if isinstance(model, DistributedDataParallel):
+                clip_grad_norm_(model.module.retriver.linear.parameters(), max_norm=1.0)
+            else:
+                clip_grad_norm_(model.retriver.linear.parameters(), max_norm=1.0)
             optimizer.step()
 
             train_reward += reward
@@ -41,51 +49,70 @@ def train_reinforce(args, model, train_dataloader, logger):
         best_reward_epoch = total_reward_history.index(best_reward) + 1
         best_loss_epoch = total_loss_history.index(best_loss) + 1
 
-        logger.info(f"==== Total Reward for Epoch {epoch}: {train_reward} ====")
-        logger.info(f"==== Total Loss for Epoch {epoch}: {train_loss} ====")
-        logger.info(f"==== Best Reward: {best_reward} at Epoch {best_reward_epoch} ====")
-        logger.info(f"==== Best Loss: {best_loss} at Epoch {best_loss_epoch} ====")
+        if accelerator.is_main_process:
+            logger.info(f"==== Total Reward for Epoch {epoch}: {train_reward} ====")
+            logger.info(f"==== Total Loss for Epoch {epoch}: {train_loss} ====")
+            logger.info(f"==== Best Reward: {best_reward} at Epoch {best_reward_epoch} ====")
+            logger.info(f"==== Best Loss: {best_loss} at Epoch {best_loss_epoch} ====")
 
-        # save every epoch
-        ckpt = os.path.join(args.output_path, f"ckpt_{epoch}.pt")
-        torch.save(model.retriver.linear.state_dict(), ckpt)
-        logger.info(f"==== Save ckpt to {ckpt} ====")
+            # save every epoch
+            ckpt = os.path.join(args.output_path, f"ckpt_{epoch}.pt")
+            if isinstance(model, DistributedDataParallel):
+                torch.save(model.module.retriver.linear.state_dict(), ckpt)
+            else:
+                torch.save(model.retriver.linear.state_dict(), ckpt)
+            logger.info(f"==== Save ckpt to {ckpt} ====")
 
-        # save best epoch
-        if epoch == best_reward_epoch:
-            ckpt = os.path.join(args.output_path, "ckpt_best_reward.pt")
+            # save best epoch
+            if epoch == best_reward_epoch:
+                ckpt = os.path.join(args.output_path, "ckpt_best_reward.pt")
+                if isinstance(model, DistributedDataParallel):
+                    torch.save(model.module.retriver.linear.state_dict(), ckpt)
+                else:
+                    torch.save(model.retriver.linear.state_dict(), ckpt)
+                logger.info(f"==== Save best reward ckpt to {ckpt} ====")
+
+            if epoch == best_loss_epoch:
+                ckpt = os.path.join(args.output_path, "ckpt_best_loss.pt")
+                if isinstance(model, DistributedDataParallel):
+                    torch.save(model.module.retriver.linear.state_dict(), ckpt)
+                else:
+                    torch.save(model.retriver.linear.state_dict(), ckpt)
+                logger.info(f"==== Save best loss ckpt to {ckpt} ====")
+
+            # save reward and loss history
+            history = {
+                "total_reward_history": total_reward_history,
+                "total_loss_history": total_loss_history,
+            }
+            history_file = os.path.join(args.log_path, "history.json")
+            with open(history_file, 'w') as f:
+                json.dump(history, f, indent=4, separators=(',', ': '))
+        
+        accelerator.wait_for_everyone()
+
+    if accelerator.is_main_process:
+        # save in the end
+        ckpt = os.path.join(args.output_path, "ckpt_final.pt")
+        if isinstance(model, DistributedDataParallel):
+            torch.save(model.module.retriver.linear.state_dict(), ckpt)
+        else:
             torch.save(model.retriver.linear.state_dict(), ckpt)
-            logger.info(f"==== Save best reward ckpt to {ckpt} ====")
-
-        if epoch == best_loss_epoch:
-            ckpt = os.path.join(args.output_path, "ckpt_best_loss.pt")
-            torch.save(model.retriver.linear.state_dict(), ckpt)
-            logger.info(f"==== Save best loss ckpt to {ckpt} ====")
-
-        # save reward and loss history
-        history = {
-            "total_reward_history": total_reward_history,
-            "total_loss_history": total_loss_history,
-        }
-        history_file = os.path.join(args.log_path, "history.json")
-        with open(history_file, 'w') as f:
-            json.dump(history, f, indent=4, separators=(',', ': '))
-
-    # save in the end
-    ckpt = os.path.join(args.output_path, "ckpt_final.pt")
-    torch.save(model.retriver.linear.state_dict(), ckpt)
-    logger.info(f"==== Save final ckpt to {ckpt} ====")
+        logger.info(f"==== Save final ckpt to {ckpt} ====")
+    
+    accelerator.wait_for_everyone()
 
 
-def train_grpo(args, model, train_dataloader, logger):
+def train_grpo(args, model, train_dataloader, logger, accelerator):
     optimizer = torch.optim.Adam([p for p in model.retriver.parameters() if p.requires_grad], lr=args.lr)
 
     total_reward_history = []
     total_loss_history = []
 
     for epoch in range(1, args.epochs + 1):
-        logger.info("=========================================")
-        logger.info(f"==== Epoch: {epoch} / {args.epochs} ====")
+        if accelerator.is_main_process:
+            logger.info("=========================================")
+            logger.info(f"==== Epoch: {epoch} / {args.epochs} ====")
 
         train_reward = 0.0
         train_loss = 0.0
@@ -101,7 +128,7 @@ def train_grpo(args, model, train_dataloader, logger):
             for group in groups:
                 reward, loss = model(group)
 
-                loss.backward()
+                accelerator.backward(loss)
                 group_loss += loss.item()
                 group_reward += reward.item()
 
@@ -119,47 +146,53 @@ def train_grpo(args, model, train_dataloader, logger):
         best_reward_epoch = total_reward_history.index(best_reward) + 1
         best_loss_epoch = total_loss_history.index(best_loss) + 1
 
-        logger.info(f"==== Total Reward for Epoch {epoch}: {train_reward} ====")
-        logger.info(f"==== Total Loss for Epoch {epoch}: {train_loss} ====")
-        logger.info(f"==== Best Reward: {best_reward} at Epoch {best_reward_epoch} ====")
-        logger.info(f"==== Best Loss: {best_loss} at Epoch {best_loss_epoch} ====")
+        if accelerator.is_main_process:
+            logger.info(f"==== Total Reward for Epoch {epoch}: {train_reward} ====")
+            logger.info(f"==== Total Loss for Epoch {epoch}: {train_loss} ====")
+            logger.info(f"==== Best Reward: {best_reward} at Epoch {best_reward_epoch} ====")
+            logger.info(f"==== Best Loss: {best_loss} at Epoch {best_loss_epoch} ====")
 
-        # save every epoch
-        ckpt = os.path.join(args.output_path, f"ckpt_{epoch}.pt")
+            # save every epoch
+            ckpt = os.path.join(args.output_path, f"ckpt_{epoch}.pt")
+            torch.save(model.retriver.linear.state_dict(), ckpt)
+            logger.info(f"==== Save ckpt to {ckpt} ====")
+
+            # save best epoch
+            if epoch == best_reward_epoch:
+                ckpt = os.path.join(args.output_path, "ckpt_best_reward.pt")
+                torch.save(model.retriver.linear.state_dict(), ckpt)
+                logger.info(f"==== Save best reward ckpt to {ckpt} ====")
+
+            if epoch == best_loss_epoch:
+                ckpt = os.path.join(args.output_path, "ckpt_best_loss.pt")
+                torch.save(model.retriver.linear.state_dict(), ckpt)
+                logger.info(f"==== Save best loss ckpt to {ckpt} ====")
+
+            # save reward and loss history
+            history = {
+                "total_reward_history": total_reward_history,
+                "total_loss_history": total_loss_history,
+            }
+            history_file = os.path.join(args.log_path, "history.json")
+            with open(history_file, 'w') as f:
+                json.dump(history, f, indent=4, separators=(',', ': '))
+        
+        accelerator.wait_for_everyone()
+
+    if accelerator.is_main_process:
+        # save in the end
+        ckpt = os.path.join(args.output_path, "ckpt_final.pt")
         torch.save(model.retriver.linear.state_dict(), ckpt)
-        logger.info(f"==== Save ckpt to {ckpt} ====")
+        logger.info(f"==== Save final ckpt to {ckpt} ====")
 
-        # save best epoch
-        if epoch == best_reward_epoch:
-            ckpt = os.path.join(args.output_path, "ckpt_best_reward.pt")
-            torch.save(model.retriver.linear.state_dict(), ckpt)
-            logger.info(f"==== Save best reward ckpt to {ckpt} ====")
-
-        if epoch == best_loss_epoch:
-            ckpt = os.path.join(args.output_path, "ckpt_best_loss.pt")
-            torch.save(model.retriver.linear.state_dict(), ckpt)
-            logger.info(f"==== Save best loss ckpt to {ckpt} ====")
-
-        # save reward and loss history
-        history = {
-            "total_reward_history": total_reward_history,
-            "total_loss_history": total_loss_history,
-        }
-        history_file = os.path.join(args.log_path, "history.json")
-        with open(history_file, 'w') as f:
-            json.dump(history, f, indent=4, separators=(',', ': '))
-
-    # save in the end
-    ckpt = os.path.join(args.output_path, "ckpt_final.pt")
-    torch.save(model.retriver.linear.state_dict(), ckpt)
-    logger.info(f"==== Save final ckpt to {ckpt} ====")
+    accelerator.wait_for_everyone()
 
 
-def train(args, model, train_dataloader, logger):
+def train(args, model, train_dataloader, logger, accelerator):
     if args.method == 'reinforce':
-        train_reinforce(args, model, train_dataloader, logger)
+        train_reinforce(args, model, train_dataloader, logger, accelerator)
     elif args.method == 'grpo':
-        train_grpo(args, model, train_dataloader, logger)
+        train_grpo(args, model, train_dataloader, logger, accelerator)
 
 
 def get_args():
@@ -272,6 +305,10 @@ def main():
 
     set_seeds(args)
 
+    accelerator = Accelerator(
+        mixed_precision='bf16'
+    )
+
     model = HalluRLRAG (
         args.retriver_name,
         args.embedding_size,
@@ -284,13 +321,13 @@ def main():
         args.use_hf_model,
         args.n_shot,
         args.n_preselect,
-    ).to(args.device)
+    ).to(accelerator.device)
 
     train_dataloader = get_dataloader(args, name='NQ', split='train')
 
     logger = get_logger(args)
 
-    train(args, model, train_dataloader, logger)
+    train(args, model, train_dataloader, logger, accelerator)
 
 
 if __name__ == '__main__':
