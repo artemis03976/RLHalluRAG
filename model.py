@@ -6,7 +6,6 @@ from modules.retriver import PolicyRetriever
 from modules.base import BaseModel
 from modules.evaluator import HalluEvaluator
 from rank_bm25 import BM25Okapi
-import sys
 
 
 def bm25_sparse_retrieve(query, contexts, n_preselect):

@@ -111,9 +111,9 @@ def get_dataloader(args, name='HotPotQA', split='train'):
 if __name__ == '__main__':
     dataset = NQDataset()
     print(len(dataset))
-    dataloader = DataLoader(dataset, batch_size=2, shuffle=True, collate_fn=collate_fn)
+    dataloader = DataLoader(dataset, batch_size=1, shuffle=True, collate_fn=collate_fn)
     for batch in dataloader:
         # print(batch)
-        print(batch[0]['contexts'][0])
+        print(batch)
         break
     
