@@ -14,7 +14,7 @@ def inference(args, model, test_dataloader):
         model.eval()
         test_acc = 0.0 
         for batch in tqdm(test_dataloader):
-            outputs = model.bm25_generate(batch)
+            outputs = model.generate(batch)
             test_acc += sum(outputs)
         print(f"Test Accuracy: {test_acc / args.n_samples}")
 
@@ -27,8 +27,8 @@ def get_args():
         help='path to save the model'
     )
     parser.add_argument(
-        '--n_samples', type=int, default=50,
-        help='Number of training samples.'
+        '--n_samples', type=int, default=200,
+        help='Number of testing samples.'
     )
 
     args = parser.parse_args()
@@ -60,7 +60,8 @@ def main():
         args.use_hf_model,
         args.n_shot,
         args.n_preselect,
-    ).to(args.device)
+        args.n_gpus,
+    )
 
     state_dict = torch.load(os.path.join(args.checkpoint_path, 'ckpt_best_reward.pt'))
     model.retriver.linear.load_state_dict(state_dict)

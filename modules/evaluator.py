@@ -66,12 +66,14 @@ class HalluEvaluator(nn.Module):
             )}
         ]
 
-    def forward(self, question, golden_answer, generated_answer):
-        # generate the prompt input
-        prompt = self.build_evaluator_prompt(question, golden_answer, generated_answer)
-        # get the output from evaluator model
-        output = self.call_api(json.dumps(prompt))
-        # extract the judgement from the output
-        judgement = extract_judgement(output)
+    def forward(self, batch_questions, batch_answers, batch_generated_answers):
+        judgements = []
+        for question, golden_answer, generated_answer in zip(batch_questions, batch_answers, batch_generated_answers):
+            # generate the prompt input
+            prompt = self.build_evaluator_prompt(question, golden_answer, generated_answer)
+            # get the output from evaluator model
+            output = self.call_api(json.dumps(prompt))
+            # extract the judgement from the output
+            judgements.append(extract_judgement(output))
 
-        return judgement
+        return judgements

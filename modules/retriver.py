@@ -36,6 +36,8 @@ class PolicyRetriever(nn.Module):
         else:
             self.linear = None
 
+        self.to("cuda:0")
+
     def get_embedding(self, input_list):
         input_ids = self.tokenizer(input_list, truncation=True, padding=True, return_tensors="pt").to(self.model.device)
         output = self.model(**input_ids, output_hidden_states=True)
@@ -48,13 +50,24 @@ class PolicyRetriever(nn.Module):
 
         return embedding
 
-    def forward(self, question, context):
-        embedding_questions = self.get_embedding(question)  # 1 x embedding_size 
-        embedding_contexts = self.get_embedding(context)  # n_preselect x embedding_size
+    def forward(self, batch_questions, batch_contexts):
+        batch_size = len(batch_contexts)
+        n_contexts = len(batch_contexts[0]) if batch_size > 0 else 0
 
-        score = torch.mm(embedding_questions, embedding_contexts.t())  # 1 x n_preselect
+        embedding_questions = self.get_embedding(batch_questions)  # [B, embedding_size]
 
-        prob = torch.softmax(score, dim=-1).squeeze()
-        log_prob = torch.log_softmax(score, dim=-1).squeeze()
+        # Flatten batch
+        flattened_batch_contexts = []
+        for batch in batch_contexts:
+            flattened_batch_contexts.extend(batch)
+        embedding_contexts = self.get_embedding(flattened_batch_contexts).view(batch_size, n_contexts, -1)  # [B, n_preselect, embedding_size]
 
-        return score, prob, log_prob
+        batch_scores = torch.bmm(
+            embedding_questions.unsqueeze(1), 
+            embedding_contexts.transpose(1, 2)
+        ).squeeze(1)  # [B, n_preselect]
+
+        batch_probs = torch.softmax(batch_scores, dim=-1)
+        batch_log_probs = torch.log_softmax(batch_scores, dim=-1)
+
+        return batch_scores, batch_probs, batch_log_probs

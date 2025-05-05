@@ -6,6 +6,7 @@ from modules.retriver import PolicyRetriever
 from modules.base import BaseModel
 from modules.evaluator import HalluEvaluator
 from rank_bm25 import BM25Okapi
+import sys
 
 
 def bm25_sparse_retrieve(query, contexts, n_preselect):
@@ -39,6 +40,7 @@ class HalluRLRAG(nn.Module):
         use_hf_model,
         n_shot,
         n_preselect,
+        n_gpus,
     ):
         super().__init__()
 
@@ -57,6 +59,7 @@ class HalluRLRAG(nn.Module):
             temperature=temperature,
             max_tokens=max_tokens,
             top_p=top_p,
+            n_gpus=n_gpus,
         )
 
         self.evaluator = HalluEvaluator(
@@ -76,42 +79,58 @@ class HalluRLRAG(nn.Module):
         return idxs, shot_contexts
 
     def forward_reinforce(self, batch):
+        batch_size = len(batch['questions'])
+
+        batch_questions = batch['questions']
+        batch_answers = batch['answers']
+        batch_contexts = batch['contexts']
+
         batch_loss = 0.0
         batch_reward = 0.0
 
-        for sample in batch:
-            question, answer, context = sample['questions'], sample['answers'], sample['contexts']
-            # spaese retrive using BM25
-            sparse_retrived_contexts = bm25_sparse_retrieve(question, context, self.n_preselect)
-            # get retriver score 
-            score, prob, log_prob = self.retriver(question, sparse_retrived_contexts)
-            # get final retrived contexts
-            k = min(self.n_shot, (prob > 1e-6).sum().item())
-            idxs, relative_context = self.select_context(sparse_retrived_contexts, prob, k)
+        # spaese retrive using BM25
+        sparse_retrived_contexts = [
+            bm25_sparse_retrieve(q, ctx, self.n_preselect)
+            for q, ctx in zip(batch_questions, batch_contexts)
+        ]
 
-            # test from 0-shot to k-shot
-            shot_loss, shot_reward = 0.0, 0.0
-            for i in range(0, k + 1):
-                generated_answer = self.base_model(relative_context[:i], question)
+        # get retriver score 
+        scores, probs, log_probs = self.retriver(batch_questions, sparse_retrived_contexts)
+        # get final retrived contexts
+        batch_idxs, batch_relative_contexts = [], []
+        for i in range(batch_size):
+            k = min(self.n_shot, (probs[i] > 1e-6).sum().item())
+            idxs, relative_context = self.select_context(sparse_retrived_contexts[i], probs[i], k)
+            batch_idxs.append(idxs)
+            batch_relative_contexts.append(relative_context)
 
-                judgement = self.evaluator(question, answer, generated_answer)
-                # print(judgement)
+        # test from 0-shot to k-shot
+        for i in range(batch_size):
+            idxs = batch_idxs[i]
+            contexts = batch_relative_contexts[i]
+            shot_contexts = [contexts[:j] for j in range(len(idxs) + 1)]
 
-                if judgement == 'NO':
-                    reward = 1
-                elif judgement == 'YES':
-                    reward = -1
-                else:
-                    reward = 0
+            batch_generated_answers = self.base_model(shot_contexts, batch_questions[i])
 
-                if i != 0:
-                    shot_loss -= reward * log_prob[idxs[i - 1]]
-                shot_reward += reward
-            
-            batch_loss += shot_loss
-            batch_reward += shot_reward
+            judgements = self.evaluator(
+                [batch_questions[i] for _ in range(len(idxs) + 1)],
+                [batch_answers[i] for _ in range(len(idxs) + 1)], 
+                batch_generated_answers
+            )
 
-        return batch_reward / len(batch), batch_loss / len(batch)
+            reward = torch.tensor(
+                [1 if item == "NO" else 0 for item in judgements], 
+                device=log_probs.device,
+                dtype=log_probs.dtype,
+            )
+            # cum_rewards = torch.cumsum(reward[1:].flip(0), dim=0).flip(0)
+            baseline = torch.mean(reward)
+            advantage = reward[1:] - baseline
+
+            batch_loss += -torch.sum(advantage * log_probs[i, idxs])
+            batch_reward += torch.sum(reward)
+
+        return batch_reward / batch_size, batch_loss / batch_size
     
     def forward_grpo(self, group):
         group_reward = []
@@ -169,46 +188,66 @@ class HalluRLRAG(nn.Module):
     def generate(self, batch):
         results = []
 
-        for sample in batch:
-            question, answer, context = sample['questions'], sample['answers'], sample['contexts']
-            # spaese retrive using BM25
-            sparse_retrived_contexts = bm25_sparse_retrieve(question, context, self.n_preselect)
-            # get retriver score 
-            score, prob, log_prob = self.retriver(question, sparse_retrived_contexts)
-            # get final retrived contexts
-            k = min(self.n_shot, (prob > 1e-6).sum().item())
-            _, relative_context = self.select_context(sparse_retrived_contexts, prob, k)
+        batch_size = len(batch['questions'])
+        batch_questions = batch['questions']
+        batch_answers = batch['answers']
+        batch_contexts = batch['contexts']
 
-            generated_answer = self.base_model(relative_context, question)
+        # sparse retrive using BM25
+        sparse_retrived_contexts = [
+            bm25_sparse_retrieve(q, ctx, self.n_preselect)
+            for q, ctx in zip(batch_questions, batch_contexts)
+        ]
+        # get retriver score 
+        scores, probs, log_probs = self.retriver(batch_questions, sparse_retrived_contexts)
+        # get final retrived contexts
+        batch_relative_contexts = []
+        for i in range(batch_size):
+            k = min(self.n_shot, (probs[i] > 1e-6).sum().item())
+            _, relative_context = self.select_context(sparse_retrived_contexts[i], probs[i], k)
+            batch_relative_contexts.append(relative_context)
 
-            judgement = self.evaluator(question, answer, generated_answer)
+        for i in range(batch_size):
+            contexts = batch_relative_contexts[i]
+            generated_answer = self.base_model([contexts], batch_questions[i])
 
-            if judgement == 'NO':
-                acc = 1
-            elif judgement == 'YES':
-                acc = 0
-            
-            results.append(acc)
+            judgement = self.evaluator(
+                batch_questions[i] ,
+                batch_answers[i], 
+                generated_answer
+            )
+
+            acc = [1 if item == "NO" else 0 for item in judgement]
+        
+            results.extend(acc)
         
         return results
     
     def bm25_generate(self, batch):
         results = []
 
-        for sample in batch:
-            question, answer, context = sample['questions'], sample['answers'], sample['contexts']
+        batch_size = len(batch['questions'])
+        batch_questions = batch['questions']
+        batch_answers = batch['answers']
+        batch_contexts = batch['contexts']
 
-            retrived_contexts = bm25_sparse_retrieve(question, context, self.n_shot)
+        retrived_contexts = [
+            bm25_sparse_retrieve(q, ctx, self.n_shot)
+            for q, ctx in zip(batch_questions, batch_contexts)
+        ]
 
-            generated_answer = self.base_model(retrived_contexts, question)
+        for i in range(batch_size):
+            contexts = retrived_contexts[i]
+            generated_answer = self.base_model([contexts], batch_questions[i])
 
-            judgement = self.evaluator(question, answer, generated_answer)
+            judgement = self.evaluator(
+                batch_questions[i] ,
+                batch_answers[i], 
+                generated_answer
+            )
 
-            if judgement == 'NO':
-                acc = 1
-            elif judgement == 'YES':
-                acc = 0
-            
-            results.append(acc)
+            acc = [1 if item == "NO" else 0 for item in judgement]
+        
+            results.extend(acc)
         
         return results

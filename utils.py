@@ -36,4 +36,7 @@ def get_logger(args):
     logging.basicConfig(filename=file_path, filemode='w', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     logger = logging.getLogger()
 
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+
     return logger

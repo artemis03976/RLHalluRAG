@@ -84,11 +84,11 @@ class MultiDocQAChineseDataset(Dataset):
 
 
 def collate_fn(batch):
-    return [{
-        'questions': item['questions'],
-        'contexts': item['contexts'],
-        'answers': item['answers']
-    } for item in batch ]
+    return {
+        'questions': [item['questions'] for item in batch],
+        'answers': [item['answers'] for item in batch],
+        'contexts': [item['contexts'] for item in batch]
+    }
 
 
 def get_dataloader(args, name='HotPotQA', split='train'):
