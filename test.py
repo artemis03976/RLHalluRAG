@@ -27,7 +27,7 @@ def get_args():
         help='path to save the model'
     )
     parser.add_argument(
-        '--n_samples', type=int, default=200,
+        '--n_samples', type=int, default=1000,
         help='Number of testing samples.'
     )
 

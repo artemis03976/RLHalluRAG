@@ -250,3 +250,27 @@ class HalluRLRAG(nn.Module):
             results.extend(acc)
         
         return results
+
+    def zero_shot_generate(self, batch):
+        results = []
+
+        batch_size = len(batch['questions'])
+        batch_questions = batch['questions']
+        batch_answers = batch['answers']
+        batch_contexts = batch['contexts']
+
+        for i in range(batch_size):
+            contexts = []
+            generated_answer = self.base_model([contexts], batch_questions[i])
+
+            judgement = self.evaluator(
+                batch_questions[i] ,
+                batch_answers[i], 
+                generated_answer
+            )
+
+            acc = [1 if item == "NO" else 0 for item in judgement]
+        
+            results.extend(acc)
+        
+        return results
